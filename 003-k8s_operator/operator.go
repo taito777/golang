@@ -6,10 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"path/filepath"
+	"time"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 )
@@ -60,6 +64,31 @@ func listFoos(client dynamic.Interface, namespace string) (*FooList, error) {
 	return &fooList, nil
 }
 
+func createPod(clientset *kubernetes.Clientset, namespace, name string) error {
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:  "busybox",
+					Image: "gcr.io/google_containers/echoserver:1.4",
+				},
+			},
+			RestartPolicy: v1.RestartPolicyAlways,
+		},
+	}
+	_, err := clientset.CoreV1().Pods(namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
+	if err != nil {
+		fmt.Printf("failed to create Pod %v\n", err)
+		return err
+	}
+	fmt.Printf("Successfully created a Pod (%s)", name)
+	return nil
+}
+
 func main() {
 	var defaultKubeConfigPath string
 	if home := homedir.HomeDir(); home != "" {
@@ -83,12 +112,31 @@ func main() {
 	// https://pkg.go.dev/k8s.io/client-go/dynamic#NewForConfig
 	client, _ := dynamic.NewForConfig(config)
 
-	// Get list of Foo objects from all namespaces
-	foos, _ := listFoos(client, "")
+	clientset, _ := kubernetes.NewForConfig(config)
 
-	// Print Foo objects
-	fmt.Println("INDEX\tNAMESPACE\tNAME")
-	for i, foo := range foos.Items {
-		fmt.Printf("%d\t%s\t%s\n", i, foo.GetNamespace(), foo.GetName())
+	for {
+		// Get list of Foo objects from all namespaces
+		foos, _ := listFoos(client, "")
+
+		// Print Foo objects
+		for i, foo := range foos.Items {
+			namespace := foo.GetNamespace()
+			name := foo.GetName()
+			fmt.Printf("%d\t%s\t%s\n", i, namespace, name)
+			// Check if there's corresponding Pod.
+			_, err := clientset.CoreV1().Pods(namespace).Get(context.Background(), name, metav1.GetOptions{})
+			if err != nil {
+				if errors.IsNotFound(err) {
+					// create new pod
+					fmt.Println("Pod doesn't exist. Creating new Pod")
+					createPod(clientset, namespace, name)
+				} else {
+					fmt.Printf("failed to get pod %v\n", err)
+				}
+			} else {
+				fmt.Printf("successfully got pod %s\n", name)
+			}
+		}
+		time.Sleep(1 * time.Second)
 	}
 }
